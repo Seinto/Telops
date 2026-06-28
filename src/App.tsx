@@ -17,6 +17,9 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const recognitionRef = useRef<any>(null);
   const activeStartRef = useRef<number>(0);
+  // ユーザーが「停止」ボタン等で明示的に止めたかどうかを判定するためのフラグ
+  //（onendの自動再開ループが、終了後やエラー後にも再起動してしまうのを防ぐ）
+  const shouldContinueRef = useRef<boolean>(false);
 
   const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -29,25 +32,45 @@ export default function App() {
     }
   };
 
-  // 🗣️ 完全自動で動画から音声を吸い上げてテロップを並べる処理
+  const stopAutoTranscription = () => {
+    shouldContinueRef.current = false;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // already stopped
+      }
+    }
+    setIsProcessing(false);
+  };
+
+  // 🗣️ マイクから動画の音声を拾ってテロップを生成する処理
+  // ⚠️ Web Speech API はブラウザの「マイク入力」を音声認識のソースとしており、
+  //    動画ファイルの音声トラックを直接読み込むことはできません（Safari/Chrome共通の仕様）。
+  //    そのため、スマホ/PCのスピーカーから動画を再生し、その音をマイクが拾う形になります。
+  //    静かな環境で、スピーカー音量を上げてお使いください（ヘッドホン使用時は認識できません）。
   const startAutoTranscription = () => {
     const targetWindow = window as any;
     const SpeechRecognition = targetWindow.SpeechRecognition || targetWindow.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setStatusMessage('❌ お使いのブラウザは音声認識に対応していません。最新のSafari等でお試しください。');
+      setStatusMessage('❌ お使いのブラウザは音声認識に対応していません。最新のSafari（iOS/macOS）かChromeでお試しください。');
       return;
     }
 
     if (!videoRef.current) return;
 
+    // Safari は https（または localhost）でない環境だと SpeechRecognition 自体を
+    // 動かさないことがあるため、明示的にチェックしてユーザーに伝える
+    const isSecureContext = window.isSecureContext;
+    if (!isSecureContext) {
+      setStatusMessage('❌ このページは安全な接続（https）で開かれていないため、音声認識を利用できません。');
+      return;
+    }
+
     setIsProcessing(true);
     setSubtitles([]);
-    setStatusMessage('⏳ 音声認識システムを起動中...（まもなく自動で文字起こしが始まります）');
-
-    // 動画を最初に戻し、音を出した状態で裏で再生
-    videoRef.current.currentTime = 0;
-    videoRef.current.muted = false;
+    setStatusMessage('🎤 マイクの使用許可を確認しています...');
 
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
@@ -55,14 +78,15 @@ export default function App() {
     recognition.lang = 'ja-JP';
 
     activeStartRef.current = 0;
+    shouldContinueRef.current = true;
 
     recognition.onstart = () => {
-      setStatusMessage('🗣️ 動画を解析中... お子様の言葉を検出して自動でテロップを生成しています。そのままお待ちください。');
-      if (videoRef.current) {
-        videoRef.current.play().catch(() => {
-          setStatusMessage('💡 画面を一度タップするか、動画の再生ボタン（▶）を押して解析を開始してください。');
-        });
-      }
+      setStatusMessage('🗣️ 動画を再生し、マイクで音声を解析しています。スピーカーの音量を上げて静かな環境でお待ちください。');
+
+      // play() はユーザーのクリックイベントから直接呼ばれる startAutoTranscription 内の
+      // 同期処理に含めるのが理想だが、recognition.start() 自体が非同期で完了するため
+      // onstart 内では Safari がブロックする可能性がある。
+      // そのため、再生開始はボタンクリック直後（下の onClick 側）で行う設計に変更している。
     };
 
     recognition.onresult = (event: any) => {
@@ -107,18 +131,72 @@ export default function App() {
       }
     };
 
-    recognition.onend = () => {
-      // 動画がまだ最後までいっていない場合は自動で認識を再開
-      if (videoRef.current && !videoRef.current.paused && videoRef.current.currentTime < videoRef.current.duration - 0.5) {
-        recognition.start();
+    recognition.onerror = (event: any) => {
+      shouldContinueRef.current = false;
+      setIsProcessing(false);
+
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        setStatusMessage('❌ マイクの使用が許可されていません。Safariの「設定」→「Webサイト」→「マイク」、またはアドレスバーのアイコンから許可を確認してください。');
+      } else if (event.error === 'no-speech') {
+        setStatusMessage('⚠️ 音声が検出できませんでした。スピーカー音量を上げて、もう一度お試しください。');
+      } else if (event.error === 'audio-capture') {
+        setStatusMessage('❌ マイクが見つかりません。マイク付きの端末でお試しください。');
       } else {
+        setStatusMessage(`❌ 音声認識でエラーが発生しました（${event.error}）。もう一度お試しください。`);
+      }
+
+      if (videoRef.current) {
+        videoRef.current.pause();
+      }
+    };
+
+    recognition.onend = () => {
+      const video = videoRef.current;
+      const stillPlaying = video && !video.paused && !video.ended && video.currentTime < video.duration - 0.5;
+
+      // ユーザーが停止していない & 動画がまだ続いている場合のみ自動再開
+      if (shouldContinueRef.current && stillPlaying) {
+        try {
+          recognition.start();
+        } catch {
+          // 連続start呼び出しで例外が出ることがあるため握りつぶして終了扱いにする
+          shouldContinueRef.current = false;
+          setIsProcessing(false);
+        }
+      } else {
+        shouldContinueRef.current = false;
         setIsProcessing(false);
-        setStatusMessage('🎉 全自動テロップ生成が完了しました！右側の一覧から自由に文字を修正・編集できます。');
+        if (video && video.ended) {
+          setStatusMessage('🎉 全自動テロップ生成が完了しました！右側の一覧から自由に文字を修正・編集できます。');
+        }
       }
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+
+    // 動画の再生も音声認識の開始も、すべて「ボタンクリック」という
+    // 同一のユーザー操作の中で同期的に呼び出すことで、Safariの自動再生・
+    // マイク権限ブロックを避ける。
+    videoRef.current.currentTime = 0;
+    videoRef.current.muted = false;
+
+    const playPromise = videoRef.current.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        setStatusMessage('💡 動画の再生がブロックされました。プレビュー画面の再生ボタン（▶）を押してから、もう一度「✨ 超高精度テロップを自動生成」を押してください。');
+        setIsProcessing(false);
+        shouldContinueRef.current = false;
+        return;
+      });
+    }
+
+    try {
+      recognition.start();
+    } catch (err) {
+      setStatusMessage('❌ 音声認識を開始できませんでした。ページを再読み込みしてもう一度お試しください。');
+      setIsProcessing(false);
+      shouldContinueRef.current = false;
+    }
   };
 
   // 動画の再生が終わったら自動的に終了する監視処理
@@ -127,6 +205,7 @@ export default function App() {
     if (!video) return;
 
     const handleVideoEnd = () => {
+      shouldContinueRef.current = false;
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
@@ -166,17 +245,17 @@ export default function App() {
         <h1 style={{ fontSize: '24px', margin: '0 0 5px 0', color: '#1d1d1f' }}>🎥 お子様動画専用・自動テロップ編集アプリ</h1>
         <p style={{ color: '#86868b', fontSize: '14px', margin: 0 }}>動画を選ぶだけで、ズレのないテロップを完全自動で生成します。</p>
       </header>
-      
+
       <div style={{ marginBottom: '25px', backgroundColor: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
         <input type="file" accept="video/*" onChange={handleVideoChange} style={{ fontSize: '15px' }} />
-        {videoSrc && (
-          <button 
-            onClick={startAutoTranscription} 
+        {videoSrc && !isProcessing && (
+          <button
+            onClick={startAutoTranscription}
             disabled={isProcessing}
             style={{
               marginLeft: '15px',
               padding: '10px 20px',
-              backgroundColor: isProcessing ? '#ccc' : '#0071e3',
+              backgroundColor: '#0071e3',
               color: '#fff',
               border: 'none',
               borderRadius: '8px',
@@ -185,7 +264,25 @@ export default function App() {
               fontSize: '14px'
             }}
           >
-            {isProcessing ? '⏳ 自動解析中...' : '✨ 超高精度テロップを自動生成'}
+            ✨ 超高精度テロップを自動生成
+          </button>
+        )}
+        {videoSrc && isProcessing && (
+          <button
+            onClick={stopAutoTranscription}
+            style={{
+              marginLeft: '15px',
+              padding: '10px 20px',
+              backgroundColor: '#ff3b30',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontWeight: 'bold',
+              fontSize: '14px'
+            }}
+          >
+            ⏹️ 解析を停止
           </button>
         )}
 
@@ -194,6 +291,12 @@ export default function App() {
             {statusMessage}
           </div>
         )}
+
+        <div style={{ marginTop: '12px', color: '#86868b', fontSize: '12px', lineHeight: 1.6 }}>
+          ⚠️ この機能はマイクで動画の音を拾って文字起こしします（ブラウザの仕様上、動画ファイルの音声を直接読み込むことはできません）。
+          スピーカーの音量を上げ、周囲が静かな環境でお使いください。ヘッドホン再生では認識できません。
+          初回はマイクの使用許可ダイアログが表示されるので「許可」を選んでください。
+        </div>
       </div>
 
       {videoSrc && (
@@ -251,12 +354,12 @@ export default function App() {
                       type="text"
                       value={sub.text}
                       onChange={(e) => handleTextChange(sub.id, e.target.value)}
-                      style={{ 
-                        width: '100%', 
-                        padding: '10px', 
-                        fontSize: '14px', 
-                        borderRadius: '8px', 
-                        border: '1px solid #d1d1d6', 
+                      style={{
+                        width: '100%',
+                        padding: '10px',
+                        fontSize: '14px',
+                        borderRadius: '8px',
+                        border: '1px solid #d1d1d6',
                         boxSizing: 'border-box',
                         backgroundColor: '#fff'
                       }}
