@@ -7,15 +7,6 @@ interface Subtitle {
   text: string;
 }
 
-// 💡 GitHub Actionsのビルドエラー（型定義エラー）を完全に防ぐための宣言
-declare global {
-  interface Window {
-    SpeechRecognition?: any;
-    webkitSpeechRecognition?: any;
-    webkitAudioContext?: typeof AudioContext;
-  }
-}
-
 export default function App() {
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
@@ -36,7 +27,7 @@ export default function App() {
     }
   };
 
-  // 🗣️ 動画の音声を直接テキスト化する処理
+  // 🗣️ 動画の音声を直接テキスト化する処理（安全互換モード）
   const startDirectTranscription = async () => {
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = fileInput?.files?.[0];
@@ -49,7 +40,9 @@ export default function App() {
     setStatusMessage('🎵 動画の音声データを直接解析中...（マイクの音は使いません）');
 
     try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      const targetWindow = window as any;
+      const AudioContextClass = targetWindow.AudioContext || targetWindow.webkitAudioContext;
+      
       if (!AudioContextClass) {
         throw new Error("お使いのブラウザは音声処理に対応していません。");
       }
@@ -63,7 +56,7 @@ export default function App() {
           
           setStatusMessage('🧠 高精度音声認識システムを準備中...');
           
-          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          const SpeechRecognition = targetWindow.SpeechRecognition || targetWindow.webkitSpeechRecognition;
           if (!SpeechRecognition) {
             throw new Error("お使いのブラウザは音声認識に対応していません。最新のSafari等でお試しください。");
           }
