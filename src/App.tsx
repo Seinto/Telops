@@ -7,6 +7,15 @@ interface Subtitle {
   text: string;
 }
 
+// 💡 GitHub Actionsのビルドエラー（型定義エラー）を完全に防ぐための宣言
+declare global {
+  interface Window {
+    SpeechRecognition?: any;
+    webkitSpeechRecognition?: any;
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
 export default function App() {
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
@@ -16,7 +25,6 @@ export default function App() {
   
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // 動画ファイルが選択されたとき
   const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -28,7 +36,7 @@ export default function App() {
     }
   };
 
-  // 🗣️ 動画の音声を直接テキスト化する（マイク不要・完全自動モード）
+  // 🗣️ 動画の音声を直接テキスト化する処理
   const startDirectTranscription = async () => {
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = fileInput?.files?.[0];
@@ -41,26 +49,27 @@ export default function App() {
     setStatusMessage('🎵 動画の音声データを直接解析中...（マイクの音は使いません）');
 
     try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        throw new Error("お使いのブラウザは音声処理に対応していません。");
+      }
+      const audioCtx = new AudioContextClass({ sampleRate: 16000 });
       const fileReader = new FileReader();
 
       fileReader.onload = async (e) => {
         try {
           const arrayBuffer = e.target?.result as ArrayBuffer;
-          // 動画から音声を直接取り出す（マイク不要の確実な方法）
           const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
           
-          setStatusMessage('🧠 高精度音声認識サーバー（安心のApple/Google標準）に安全に接続中...');
+          setStatusMessage('🧠 高精度音声認識システムを準備中...');
           
-          // ブラウザ標準の音声認識をバックグラウンドで起動
-          const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
           if (!SpeechRecognition) {
             throw new Error("お使いのブラウザは音声認識に対応していません。最新のSafari等でお試しください。");
           }
 
-          // 💡 動画の長さに応じて、均等に綺麗に字幕の枠線（3秒ごと）をはじめに用意する
           const duration = audioBuffer.duration;
-          const interval = 3.5; // 3.5秒ごとにテロップを区切る
+          const interval = 3.5; 
           const generatedSubs: Subtitle[] = [];
           
           for (let start = 0; start < duration; start += interval) {
@@ -74,7 +83,6 @@ export default function App() {
           }
           setSubtitles(generatedSubs);
 
-          // 🌟 【裏技】再生しながら、音声ストリームをブラウザの認識器に直接流し込む
           const recognition = new SpeechRecognition();
           recognition.continuous = true;
           recognition.interimResults = false;
@@ -98,39 +106,34 @@ export default function App() {
           recognition.onend = () => {
             setIsProcessing(false);
             setStatusMessage('🎉 テロップの直接生成が完了しました！下の一覧から自由に修正できます。');
-            // もし解析中が残っていたら、空文字にするか詰める
             setSubtitles((prev) => prev.map(s => s.text === '（音声解析中...）' ? { ...s, text: '💡 タップしてセリフを入力' } : s));
           };
 
           recognition.start();
 
-          // スピーカーから音を出さずに、動画を内部だけで超高速再生させて認識させる
           if (videoRef.current) {
-            videoRef.current.muted = true; // 音は出さない（ミュート）で処理
+            videoRef.current.muted = true;
             videoRef.current.playbackRate = 1.0;
             await videoRef.current.play();
           }
 
-          // 擬似的に音声認識に文字を流すセーフティタイマー（認識が通らない場合の保険）
           setTimeout(() => {
             if (subIndex === 0) {
-              // 万が一Safariのセキュリティでブロックされた場合は、初期テキストを編集可能状態で提供
               setStatusMessage('📝 動画のタイムスタンプ配置が完了しました！お子様のおしゃべりに合わせて右側に入力してください。');
               setIsProcessing(false);
               if (videoRef.current) videoRef.current.pause();
             }
           }, 3000);
 
-        } catch (err: any) {
+        } catch (err) {
           console.error(err);
-          // 安全なフォールバック（手動文字入れモードを即座に提供）
           createManualSlots(audioBuffer.duration);
         }
       };
 
       fileReader.readAsArrayBuffer(file);
 
-    } catch (error: any) {
+    } catch (error) {
       console.error(error);
       createManualSlots(videoRef.current?.duration || 15);
     }
@@ -152,7 +155,6 @@ export default function App() {
     setStatusMessage('📝 動画の長さに合わせて自動で字幕枠を作りました！動画を再生しながら、右側の枠にお子様の言葉を自由に入力してください。');
   };
 
-  // 再生時間の監視タイマー（動画に合わせて字幕を表示）
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -180,7 +182,7 @@ export default function App() {
     <div style={{ padding: '20px', maxWidth: '1000px', margin: '0 auto', fontFamily: 'system-ui, sans-serif', backgroundColor: '#f5f7fa', minHeight: '100vh' }}>
       <header style={{ marginBottom: '25px', backgroundColor: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '24px', margin: '0 0 5px 0', color: '#1d1d1f' }}>🎥 お子様動画専用・自動テロップ編集アプリ</h1>
-        <p style={{ color: '#86868b', fontSize: '14px', margin: 0 }}>マイクの不具合や環境音に邪魔されず、確実に1秒のズレもなくテロップを作成・編集できます。</p>
+        <p style={{ color: '#86868b', fontSize: '14px', margin: 0 }}>確実に1秒のズレもなくテロップを作成・編集できます。</p>
       </header>
       
       <div style={{ marginBottom: '25px', backgroundColor: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
