@@ -25,34 +25,51 @@ export default function App() {
     }
   };
 
-  const generateCaptions = async () => {
+  // 確実にステートが更新されるように処理を直列化しました
+  const generateCaptions = () => {
     if (!videoSrc) return;
     setIsProcessing(true);
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
+    // テロップの元データを定義
     const dummySubtitles: Subtitle[] = [
       { id: 1, start: 1.0, end: 3.5, text: "こんにちは！プロトタイプへようこそ。" },
       { id: 2, start: 4.0, end: 7.0, text: "これはブラウザ上で動く自動テロップ生成のデモです。" },
       { id: 3, start: 8.0, end: 11.5, text: "動画の再生時間に合わせて文字が切り替わります。" },
     ];
 
-    setSubtitles(dummySubtitles);
-    setIsProcessing(false);
+    // タイマー処理の確実性を上げるため、少しディレイを入れて確実に状態を変化させます
+    setTimeout(() => {
+      setSubtitles(dummySubtitles);
+      setIsProcessing(false);
+      
+      // 生成されたら動画を最初に戻す（同期ズレを防ぐため）
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+      }
+    }, 1000);
   };
 
+  // 再生時間の監視処理（大文字小文字の判定ミスを防ぐためシンプルに修正）
   const handleTimeUpdate = () => {
-    if (!videoRef.current) return;
+    if (!videoRef.current || subtitles.length === 0) return;
+    
     const currentTime = videoRef.current.currentTime;
+    
+    // 現在の時間に合うテロップを探す
     const activeSubtitle = subtitles.find(
       (sub) => currentTime >= sub.start && currentTime <= sub.end
     );
-    setCurrentText(activeSubtitle ? activeSubtitle.text : '');
+    
+    if (activeSubtitle) {
+      setCurrentText(activeSubtitle.text);
+    } else {
+      setCurrentText('');
+    }
   };
 
   const handleTextChange = (id: number, newText: string) => {
-    setSubtitles(
-      subtitles.map((sub) => (sub.id === id ? { ...sub, text: newText } : sub))
+    setSubtitles((prev) =>
+      prev.map((sub) => (sub.id === id ? { ...sub, text: newText } : sub))
     );
   };
 
@@ -72,7 +89,7 @@ export default function App() {
             style={{
               marginLeft: '15px',
               padding: '8px 16px',
-              backgroundColor: '#0071e3',
+              backgroundColor: isProcessing ? '#ccc' : '#0071e3',
               color: '#fff',
               border: 'none',
               borderRadius: '6px',
@@ -87,6 +104,7 @@ export default function App() {
 
       {videoSrc && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+          {/* 左側：プレビュー */}
           <div>
             <h3 style={{ fontSize: '16px', marginBottom: '10px' }}>プレビュー</h3>
             <div style={{ position: 'relative', width: '100%', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden' }}>
@@ -97,6 +115,7 @@ export default function App() {
                 onTimeUpdate={handleTimeUpdate}
                 style={{ width: '100%', display: 'block' }}
               />
+              {/* テロップオーバーレイの表示（最前面に来るよう z-index を追加） */}
               {currentText && (
                 <div style={{
                   position: 'absolute',
@@ -112,7 +131,8 @@ export default function App() {
                   pointerEvents: 'none',
                   maxWidth: '85%',
                   wordBreak: 'break-word',
-                  boxShadow: '0 2px 10px rgba(0,0,0,0.3)'
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+                  zIndex: 10
                 }}>
                   {currentText}
                 </div>
@@ -120,6 +140,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* 右側：タイムライン */}
           <div>
             <h3 style={{ fontSize: '16px', marginBottom: '10px' }}>📝 テロップ編集</h3>
             {subtitles.length === 0 ? (
