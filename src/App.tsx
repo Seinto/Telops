@@ -14,6 +14,10 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   
+  // 📊 解析の進捗状況を可視化するためのステート
+  const [progress, setProgress] = useState<number>(0);
+  const [progressPhase, setProgressPhase] = useState<string>('');
+
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -23,6 +27,8 @@ export default function App() {
       setVideoSrc(url);
       setSubtitles([]); 
       setCurrentText('');
+      setProgress(0);
+      setProgressPhase('');
       setStatusMessage('💡 動画が読み込まれました。「✨ 超高精度テロップを自動生成」を押してください。');
     }
   };
@@ -37,18 +43,18 @@ export default function App() {
     }
 
     setIsProcessing(true);
-    setStatusMessage('🎵 動画の音声データを直接解析中...（マイクの音は使いません）');
+    setProgress(5);
+    setProgressPhase('read');
+    setStatusMessage('🎵 動画ファイルから音声データを読み込んでいます... (5%)');
 
-    // 💡 【超重要】Safariのフリーズ対策タイマー
-    // 3秒経っても音声解析が進まない場合は、ブラウザ制限と判断して即座に編集枠作成モードへ切り替えます
+    // 💡 フリーズ対策のセーフティタイマー（5秒間全く進捗が動かない場合は手動枠に切り替え）
     const fallbackTimer = setTimeout(() => {
       if (videoRef.current) {
-        const duration = videoRef.current.duration || 15;
-        createManualSlots(duration);
+        createManualSlots(videoRef.current.duration || 15);
       } else {
         createManualSlots(15);
       }
-    }, 3000);
+    }, 5000);
 
     try {
       const targetWindow = window as any;
@@ -63,11 +69,18 @@ export default function App() {
 
       fileReader.onload = async (e) => {
         try {
+          setProgress(25);
+          setProgressPhase('decode');
+          setStatusMessage('⏳ 読み込んだ音声データをブラウザが解読中... (25%) ※ここで固まる場合はブラウザ制限です');
+
           const arrayBuffer = e.target?.result as ArrayBuffer;
+          
+          // Safari等でここで無限に待たされるケース対策
           const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
           
-          clearTimeout(fallbackTimer); // 解析が成功したらフォールバックを解除
-          setStatusMessage('🧠 高精度音声認識システムを準備中...');
+          setProgress(60);
+          setProgressPhase('setup');
+          setStatusMessage('🧠 AI音声認識エンジンを起動しています... (60%)');
           
           const SpeechRecognition = targetWindow.SpeechRecognition || targetWindow.webkitSpeechRecognition;
           if (!SpeechRecognition) {
@@ -95,7 +108,19 @@ export default function App() {
           recognition.lang = 'ja-JP';
 
           let subIndex = 0;
+          
+          recognition.onstart = () => {
+            clearTimeout(fallbackTimer); // 無事に動き出したらタイマー解除
+            setProgress(80);
+            setProgressPhase('listening');
+            setStatusMessage('🗣️ 準備完了！動画を1倍速で再生しながら音声をリアルタイム聞き取り中... (80%)');
+          };
+
           recognition.onresult = (event: any) => {
+            // 文字が聞き取れるたび進捗を少しずつ進める
+            const currentProg = Math.min(80 + Math.floor((subIndex / generatedSubs.length) * 20), 99);
+            setProgress(currentProg);
+
             for (let i = event.resultIndex; i < event.results.length; ++i) {
               if (event.results[i].isFinal) {
                 const text = event.results[i][0].transcript.trim();
@@ -110,9 +135,19 @@ export default function App() {
           };
 
           recognition.onend = () => {
+            clearTimeout(fallbackTimer);
+            setProgress(100);
+            setProgressPhase('success');
             setIsProcessing(false);
-            setStatusMessage('🎉 テロップの直接生成が完了しました！下の一覧から自由に修正できます。');
+            setStatusMessage('🎉 テロップの自動聞き取りが完了しました！右側で自由に打ち直しができます。');
             setSubtitles((prev) => prev.map(s => s.text === '（音声解析中...）' ? { ...s, text: '💡 タップしてセリフを入力' } : s));
+          };
+
+          recognition.onerror = (err: any) => {
+            console.error('認識エラー:', err);
+            // エラーが出ても止まらず手動入力枠へ救済
+            clearTimeout(fallbackTimer);
+            createManualSlots(duration);
           };
 
           recognition.start();
@@ -126,7 +161,7 @@ export default function App() {
         } catch (err) {
           console.error(err);
           clearTimeout(fallbackTimer);
-          createManualSlots(audioBuffer.duration || 15);
+          createManualSlots(videoRef.current?.duration || 15);
         }
       };
 
@@ -152,7 +187,9 @@ export default function App() {
     }
     setSubtitles(manualSubs);
     setIsProcessing(false);
-    setStatusMessage('📝 動画の長さに合わせて自動で字幕枠を作りました！動画を再生しながら、右側の枠にお子様の言葉を自由に入力してください。');
+    setProgress(100);
+    setProgressPhase('fallback');
+    setStatusMessage('📝 【セーフティ発動】ブラウザのセキュリティ制限を検知したため、自動で「編集用の字幕枠」を敷き詰めました！動画を再生しながら右側にお子様のセリフを自由に入力してください。');
   };
 
   useEffect(() => {
@@ -203,11 +240,33 @@ export default function App() {
               fontSize: '14px'
             }}
           >
-            {isProcessing ? '⏳ 解析中...' : '✨ 超高精度テロップを自動生成'}
+            {isProcessing ? `⏳ 解析中 (${progress}%)` : '✨ 超高精度テロップを自動生成'}
           </button>
         )}
+
+        {/* 📊 視覚的なプログレスバー表示エリア */}
+        {isProcessing && (
+          <div style={{ marginTop: '15px', backgroundColor: '#e5e5ea', borderRadius: '6px', height: '8px', width: '100%', overflow: 'hidden' }}>
+            <div style={{ 
+              backgroundColor: progressPhase === 'decode' ? '#ff9500' : '#0071e3', 
+              width: `${progress}%`, 
+              height: '100%', 
+              transition: 'width 0.4s ease' 
+            }} />
+          </div>
+        )}
+
         {statusMessage && (
-          <div style={{ marginTop: '15px', color: '#1d1d1f', fontSize: '14px', fontWeight: '500', backgroundColor: '#f2f2f7', padding: '12px 16px', borderRadius: '8px', borderLeft: '4px solid #0071e3' }}>
+          <div style={{ 
+            marginTop: '15px', 
+            color: '#1d1d1f', 
+            fontSize: '14px', 
+            fontWeight: '500', 
+            backgroundColor: progressPhase === 'decode' ? '#fff9e6' : '#f2f2f7', 
+            padding: '12px 16px', 
+            borderRadius: '8px', 
+            borderLeft: `4px solid ${progressPhase === 'decode' ? '#ff9500' : '#0071e3'}` 
+          }}>
             {statusMessage}
           </div>
         )}
