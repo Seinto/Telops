@@ -27,7 +27,7 @@ export default function App() {
     }
   };
 
-  // 🗣️ 動画の音声を直接テキスト化する処理（安全互換モード）
+  // 🗣️ 動画の音声を直接テキスト化する処理
   const startDirectTranscription = async () => {
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = fileInput?.files?.[0];
@@ -39,13 +39,25 @@ export default function App() {
     setIsProcessing(true);
     setStatusMessage('🎵 動画の音声データを直接解析中...（マイクの音は使いません）');
 
+    // 💡 【超重要】Safariのフリーズ対策タイマー
+    // 3秒経っても音声解析が進まない場合は、ブラウザ制限と判断して即座に編集枠作成モードへ切り替えます
+    const fallbackTimer = setTimeout(() => {
+      if (videoRef.current) {
+        const duration = videoRef.current.duration || 15;
+        createManualSlots(duration);
+      } else {
+        createManualSlots(15);
+      }
+    }, 3000);
+
     try {
       const targetWindow = window as any;
       const AudioContextClass = targetWindow.AudioContext || targetWindow.webkitAudioContext;
       
       if (!AudioContextClass) {
-        throw new Error("お使いのブラウザは音声処理に対応していません。");
+        throw new Error("音声処理非対応");
       }
+      
       const audioCtx = new AudioContextClass({ sampleRate: 16000 });
       const fileReader = new FileReader();
 
@@ -54,11 +66,12 @@ export default function App() {
           const arrayBuffer = e.target?.result as ArrayBuffer;
           const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
           
+          clearTimeout(fallbackTimer); // 解析が成功したらフォールバックを解除
           setStatusMessage('🧠 高精度音声認識システムを準備中...');
           
           const SpeechRecognition = targetWindow.SpeechRecognition || targetWindow.webkitSpeechRecognition;
           if (!SpeechRecognition) {
-            throw new Error("お使いのブラウザは音声認識に対応していません。最新のSafari等でお試しください。");
+            throw new Error("音声認識非対応");
           }
 
           const duration = audioBuffer.duration;
@@ -110,17 +123,10 @@ export default function App() {
             await videoRef.current.play();
           }
 
-          setTimeout(() => {
-            if (subIndex === 0) {
-              setStatusMessage('📝 動画のタイムスタンプ配置が完了しました！お子様のおしゃべりに合わせて右側に入力してください。');
-              setIsProcessing(false);
-              if (videoRef.current) videoRef.current.pause();
-            }
-          }, 3000);
-
         } catch (err) {
           console.error(err);
-          createManualSlots(audioBuffer.duration);
+          clearTimeout(fallbackTimer);
+          createManualSlots(audioBuffer.duration || 15);
         }
       };
 
@@ -128,6 +134,7 @@ export default function App() {
 
     } catch (error) {
       console.error(error);
+      clearTimeout(fallbackTimer);
       createManualSlots(videoRef.current?.duration || 15);
     }
   };
