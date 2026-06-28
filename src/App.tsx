@@ -60,6 +60,22 @@ export default function App() {
 
     if (!videoRef.current) return;
 
+    // 前回のセッションの recognition インスタンスが残っている場合、
+    // 新しいインスタンスと競合して "aborted" が誤発火することがあるため
+    // 明示的に後始末しておく
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.abort();
+      } catch {
+        // ignore
+      }
+      recognitionRef.current = null;
+    }
+
     // Safari は https（または localhost）でない環境だと SpeechRecognition 自体を
     // 動かさないことがあるため、明示的にチェックしてユーザーに伝える
     const isSecureContext = window.isSecureContext;
@@ -128,6 +144,12 @@ export default function App() {
     };
 
     recognition.onerror = (event: any) => {
+      // ユーザーが既に「解析を停止」していた場合に発生する abort はエラー表示しない
+      if (!shouldContinueRef.current && event.error === 'aborted') {
+        setIsProcessing(false);
+        return;
+      }
+
       shouldContinueRef.current = false;
       setIsProcessing(false);
 
@@ -137,6 +159,8 @@ export default function App() {
         setStatusMessage('⚠️ 音声が検出できませんでした。スピーカー音量を上げて、もう一度お試しください。');
       } else if (event.error === 'audio-capture') {
         setStatusMessage('❌ マイクが見つかりません。マイク付きの端末でお試しください。');
+      } else if (event.error === 'aborted') {
+        setStatusMessage('⚠️ 音声認識が開始直後に中断されました（aborted）。マイクの使用許可ダイアログが出ていた場合は「許可」をタップしてから、もう一度ボタンを押してお試しください。連続して起きる場合は一度ページを再読み込みしてからお試しください。');
       } else {
         setStatusMessage(`❌ 音声認識でエラーが発生しました（${event.error}）。もう一度お試しください。`);
       }
@@ -199,36 +223,21 @@ export default function App() {
     };
     video.addEventListener('playing', handlePlaying, { once: true });
 
-    // 数秒たっても再生が始まっていなければ、再生失敗として明確にユーザーへ伝える
+    // 注意：ここでは recognition.stop()/abort() を呼ばない。
+    // マイクの使用許可ダイアログが表示されている最中に recognition へ触れると、
+    // Safari がそれを "aborted" エラーとして認識を中断してしまうことがあるため、
+    // 動画の再生状態に関する処理と音声認識の処理は完全に分離する。
     window.setTimeout(() => {
       video.removeEventListener('playing', handlePlaying);
       if (!playbackConfirmed && shouldContinueRef.current) {
-        shouldContinueRef.current = false;
-        setIsProcessing(false);
-        if (recognitionRef.current) {
-          try {
-            recognitionRef.current.stop();
-          } catch {
-            // ignore
-          }
-        }
-        setStatusMessage('⚠️ 動画の再生が開始されませんでした。プレビュー画面の再生ボタン（▶）を一度押してから、もう一度お試しください。');
+        setStatusMessage('⚠️ 動画が再生されていないようです。再生されない場合は、プレビュー画面の再生ボタン（▶）を一度押してからボタンを押し直してください。（音声認識は継続中です）');
       }
-    }, 4000);
+    }, 5000);
 
     const playPromise = video.play();
     if (playPromise && typeof playPromise.catch === 'function') {
       playPromise.catch(() => {
-        shouldContinueRef.current = false;
-        setIsProcessing(false);
-        if (recognitionRef.current) {
-          try {
-            recognitionRef.current.stop();
-          } catch {
-            // ignore
-          }
-        }
-        setStatusMessage('💡 動画の再生がブロックされました。プレビュー画面の再生ボタン（▶）を押してから、もう一度「✨ 超高精度テロップを自動生成」を押してください。');
+        setStatusMessage('💡 動画の自動再生がブロックされました。プレビュー画面の再生ボタン（▶）を押して動画を再生してください。（音声認識は継続中です）');
       });
     }
 
