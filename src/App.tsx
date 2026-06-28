@@ -81,12 +81,8 @@ export default function App() {
     shouldContinueRef.current = true;
 
     recognition.onstart = () => {
+      if (!shouldContinueRef.current) return;
       setStatusMessage('🗣️ 動画を再生し、マイクで音声を解析しています。スピーカーの音量を上げて静かな環境でお待ちください。');
-
-      // play() はユーザーのクリックイベントから直接呼ばれる startAutoTranscription 内の
-      // 同期処理に含めるのが理想だが、recognition.start() 自体が非同期で完了するため
-      // onstart 内では Safari がブロックする可能性がある。
-      // そのため、再生開始はボタンクリック直後（下の onClick 側）で行う設計に変更している。
     };
 
     recognition.onresult = (event: any) => {
@@ -152,24 +148,39 @@ export default function App() {
 
     recognition.onend = () => {
       const video = videoRef.current;
-      const stillPlaying = video && !video.paused && !video.ended && video.currentTime < video.duration - 0.5;
 
-      // ユーザーが停止していない & 動画がまだ続いている場合のみ自動再開
-      if (shouldContinueRef.current && stillPlaying) {
+      // ユーザーが明示的に停止した場合はそのまま終了（メッセージは上書きしない）
+      if (!shouldContinueRef.current) {
+        setIsProcessing(false);
+        return;
+      }
+
+      // 動画が最後まで再生し終わっていれば「完了」
+      if (video && video.ended) {
+        shouldContinueRef.current = false;
+        setIsProcessing(false);
+        setStatusMessage('🎉 全自動テロップ生成が完了しました！右側の一覧から自由に文字を修正・編集できます。');
+        return;
+      }
+
+      // 動画がまだ再生中であれば、認識を再開する（Safari/Chromeはcontinuous=trueでも
+      // 数十秒ごとに自動でonendを発火させることがあるため）
+      if (video && !video.paused && !video.ended) {
         try {
           recognition.start();
         } catch {
-          // 連続start呼び出しで例外が出ることがあるため握りつぶして終了扱いにする
           shouldContinueRef.current = false;
           setIsProcessing(false);
+          setStatusMessage('❌ 音声認識の再開に失敗しました。もう一度ボタンを押してお試しください。');
         }
-      } else {
-        shouldContinueRef.current = false;
-        setIsProcessing(false);
-        if (video && video.ended) {
-          setStatusMessage('🎉 全自動テロップ生成が完了しました！右側の一覧から自由に文字を修正・編集できます。');
-        }
+        return;
       }
+
+      // ここに来るのは「動画が再生されていない（再生開始に失敗した）」ケース。
+      // これまでは無条件に「完了」と表示してしまっていたため、正しくエラーとして伝える。
+      shouldContinueRef.current = false;
+      setIsProcessing(false);
+      setStatusMessage('⚠️ 動画が再生されていないため、音声を認識できませんでした。プレビュー画面の再生ボタン（▶）を一度押してから、もう一度「✨ 超高精度テロップを自動生成」をお試しください。');
     };
 
     recognitionRef.current = recognition;
@@ -180,13 +191,44 @@ export default function App() {
     videoRef.current.currentTime = 0;
     videoRef.current.muted = false;
 
-    const playPromise = videoRef.current.play();
+    let playbackConfirmed = false;
+    const video = videoRef.current;
+
+    const handlePlaying = () => {
+      playbackConfirmed = true;
+    };
+    video.addEventListener('playing', handlePlaying, { once: true });
+
+    // 数秒たっても再生が始まっていなければ、再生失敗として明確にユーザーへ伝える
+    window.setTimeout(() => {
+      video.removeEventListener('playing', handlePlaying);
+      if (!playbackConfirmed && shouldContinueRef.current) {
+        shouldContinueRef.current = false;
+        setIsProcessing(false);
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.stop();
+          } catch {
+            // ignore
+          }
+        }
+        setStatusMessage('⚠️ 動画の再生が開始されませんでした。プレビュー画面の再生ボタン（▶）を一度押してから、もう一度お試しください。');
+      }
+    }, 4000);
+
+    const playPromise = video.play();
     if (playPromise && typeof playPromise.catch === 'function') {
       playPromise.catch(() => {
-        setStatusMessage('💡 動画の再生がブロックされました。プレビュー画面の再生ボタン（▶）を押してから、もう一度「✨ 超高精度テロップを自動生成」を押してください。');
-        setIsProcessing(false);
         shouldContinueRef.current = false;
-        return;
+        setIsProcessing(false);
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.stop();
+          } catch {
+            // ignore
+          }
+        }
+        setStatusMessage('💡 動画の再生がブロックされました。プレビュー画面の再生ボタン（▶）を押してから、もう一度「✨ 超高精度テロップを自動生成」を押してください。');
       });
     }
 
