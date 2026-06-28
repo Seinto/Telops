@@ -13,185 +13,130 @@ export default function App() {
   const [currentText, setCurrentText] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
-  
-  // 📊 解析の進捗状況を可視化するためのステート
-  const [progress, setProgress] = useState<number>(0);
-  const [progressPhase, setProgressPhase] = useState<string>('');
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const recognitionRef = useRef<any>(null);
+  const activeStartRef = useRef<number>(0);
 
   const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const url = URL.createObjectURL(file);
       setVideoSrc(url);
-      setSubtitles([]); 
+      setSubtitles([]);
       setCurrentText('');
-      setProgress(0);
-      setProgressPhase('');
       setStatusMessage('💡 動画が読み込まれました。「✨ 超高精度テロップを自動生成」を押してください。');
     }
   };
 
-  // 🗣️ 動画の音声を直接テキスト化する処理
-  const startDirectTranscription = async () => {
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
-    const file = fileInput?.files?.[0];
-    if (!file) {
-      setStatusMessage('❌ 動画ファイルが選択されていません。');
+  // 🗣️ 完全自動で動画から音声を吸い上げてテロップを並べる処理
+  const startAutoTranscription = () => {
+    const targetWindow = window as any;
+    const SpeechRecognition = targetWindow.SpeechRecognition || targetWindow.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setStatusMessage('❌ お使いのブラウザは音声認識に対応していません。最新のSafari等でお試しください。');
       return;
     }
 
+    if (!videoRef.current) return;
+
     setIsProcessing(true);
-    setProgress(5);
-    setProgressPhase('read');
-    setStatusMessage('🎵 動画ファイルから音声データを読み込んでいます... (5%)');
+    setSubtitles([]);
+    setStatusMessage('⏳ 音声認識システムを起動中...（まもなく自動で文字起こしが始まります）');
 
-    // 💡 フリーズ対策のセーフティタイマー（5秒間全く進捗が動かない場合は手動枠に切り替え）
-    const fallbackTimer = setTimeout(() => {
+    // 動画を最初に戻し、音を出した状態で裏で再生
+    videoRef.current.currentTime = 0;
+    videoRef.current.muted = false;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'ja-JP';
+
+    activeStartRef.current = 0;
+
+    recognition.onstart = () => {
+      setStatusMessage('🗣️ 動画を解析中... お子様の言葉を検出して自動でテロップを生成しています。そのままお待ちください。');
       if (videoRef.current) {
-        createManualSlots(videoRef.current.duration || 15);
-      } else {
-        createManualSlots(15);
+        videoRef.current.play().catch(() => {
+          setStatusMessage('💡 画面を一度タップするか、動画の再生ボタン（▶）を押して解析を開始してください。');
+        });
       }
-    }, 5000);
+    };
 
-    try {
-      const targetWindow = window as any;
-      const AudioContextClass = targetWindow.AudioContext || targetWindow.webkitAudioContext;
-      
-      if (!AudioContextClass) {
-        throw new Error("音声処理非対応");
-      }
-      
-      const audioCtx = new AudioContextClass({ sampleRate: 16000 });
-      const fileReader = new FileReader();
+    recognition.onresult = (event: any) => {
+      if (!videoRef.current) return;
 
-      fileReader.onload = async (e) => {
-        try {
-          setProgress(25);
-          setProgressPhase('decode');
-          setStatusMessage('⏳ 読み込んだ音声データをブラウザが解読中... (25%) ※ここで固まる場合はブラウザ制限です');
+      const currentTime = videoRef.current.currentTime;
+      let interimTranscript = '';
+      let finalTranscript = '';
 
-          const arrayBuffer = e.target?.result as ArrayBuffer;
-          
-          // Safari等でここで無限に待たされるケース対策
-          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-          
-          setProgress(60);
-          setProgressPhase('setup');
-          setStatusMessage('🧠 AI音声認識エンジンを起動しています... (60%)');
-          
-          const SpeechRecognition = targetWindow.SpeechRecognition || targetWindow.webkitSpeechRecognition;
-          if (!SpeechRecognition) {
-            throw new Error("音声認識非対応");
-          }
-
-          const duration = audioBuffer.duration;
-          const interval = 3.5; 
-          const generatedSubs: Subtitle[] = [];
-          
-          for (let start = 0; start < duration; start += interval) {
-            const end = Math.min(start + interval, duration);
-            generatedSubs.push({
-              id: Date.now() + start,
-              start: start,
-              end: end,
-              text: '（音声解析中...）'
-            });
-          }
-          setSubtitles(generatedSubs);
-
-          const recognition = new SpeechRecognition();
-          recognition.continuous = true;
-          recognition.interimResults = false;
-          recognition.lang = 'ja-JP';
-
-          let subIndex = 0;
-          
-          recognition.onstart = () => {
-            clearTimeout(fallbackTimer); // 無事に動き出したらタイマー解除
-            setProgress(80);
-            setProgressPhase('listening');
-            setStatusMessage('🗣️ 準備完了！動画を1倍速で再生しながら音声をリアルタイム聞き取り中... (80%)');
-          };
-
-          recognition.onresult = (event: any) => {
-            // 文字が聞き取れるたび進捗を少しずつ進める
-            const currentProg = Math.min(80 + Math.floor((subIndex / generatedSubs.length) * 20), 99);
-            setProgress(currentProg);
-
-            for (let i = event.resultIndex; i < event.results.length; ++i) {
-              if (event.results[i].isFinal) {
-                const text = event.results[i][0].transcript.trim();
-                if (text && subIndex < generatedSubs.length) {
-                  setSubtitles((prev) => 
-                    prev.map((sub, idx) => idx === subIndex ? { ...sub, text: text } : sub)
-                  );
-                  subIndex++;
-                }
-              }
-            }
-          };
-
-          recognition.onend = () => {
-            clearTimeout(fallbackTimer);
-            setProgress(100);
-            setProgressPhase('success');
-            setIsProcessing(false);
-            setStatusMessage('🎉 テロップの自動聞き取りが完了しました！右側で自由に打ち直しができます。');
-            setSubtitles((prev) => prev.map(s => s.text === '（音声解析中...）' ? { ...s, text: '💡 タップしてセリフを入力' } : s));
-          };
-
-          recognition.onerror = (err: any) => {
-            console.error('認識エラー:', err);
-            // エラーが出ても止まらず手動入力枠へ救済
-            clearTimeout(fallbackTimer);
-            createManualSlots(duration);
-          };
-
-          recognition.start();
-
-          if (videoRef.current) {
-            videoRef.current.muted = true;
-            videoRef.current.playbackRate = 1.0;
-            await videoRef.current.play();
-          }
-
-        } catch (err) {
-          console.error(err);
-          clearTimeout(fallbackTimer);
-          createManualSlots(videoRef.current?.duration || 15);
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
         }
-      };
+      }
 
-      fileReader.readAsArrayBuffer(file);
+      const textToShow = finalTranscript || interimTranscript;
 
-    } catch (error) {
-      console.error(error);
-      clearTimeout(fallbackTimer);
-      createManualSlots(videoRef.current?.duration || 15);
-    }
+      if (textToShow.trim()) {
+        const endTime = currentTime + 1.2;
+        setSubtitles((prev) => {
+          const lastSub = prev[prev.length - 1];
+          // 同じ区間内の連続した言葉であれば上書き更新して文字を繋げる
+          if (lastSub && Math.abs(lastSub.start - activeStartRef.current) < 0.6) {
+            return prev.map((s, idx) => idx === prev.length - 1 ? { ...s, text: textToShow, end: endTime } : s);
+          } else {
+            // 新しい発言を検出したらタイムラインに追加
+            return [...prev, {
+              id: Date.now() + Math.random(),
+              start: activeStartRef.current,
+              end: endTime,
+              text: textToShow
+            }];
+          }
+        });
+      }
+
+      if (finalTranscript) {
+        activeStartRef.current = videoRef.current.currentTime;
+      }
+    };
+
+    recognition.onend = () => {
+      // 動画がまだ最後までいっていない場合は自動で認識を再開
+      if (videoRef.current && !videoRef.current.paused && videoRef.current.currentTime < videoRef.current.duration - 0.5) {
+        recognition.start();
+      } else {
+        setIsProcessing(false);
+        setStatusMessage('🎉 全自動テロップ生成が完了しました！右側の一覧から自由に文字を修正・編集できます。');
+      }
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
   };
 
-  const createManualSlots = (duration: number) => {
-    const interval = 3.0;
-    const manualSubs: Subtitle[] = [];
-    for (let start = 0; start < duration; start += interval) {
-      manualSubs.push({
-        id: Date.now() + start,
-        start: start,
-        end: Math.min(start + interval, duration),
-        text: '✏️ ここをタップして文字を入力'
-      });
-    }
-    setSubtitles(manualSubs);
-    setIsProcessing(false);
-    setProgress(100);
-    setProgressPhase('fallback');
-    setStatusMessage('📝 【セーフティ発動】ブラウザのセキュリティ制限を検知したため、自動で「編集用の字幕枠」を敷き詰めました！動画を再生しながら右側にお子様のセリフを自由に入力してください。');
-  };
+  // 動画の再生が終わったら自動的に終了する監視処理
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
 
+    const handleVideoEnd = () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+
+    video.addEventListener('ended', handleVideoEnd);
+    return () => video.removeEventListener('ended', handleVideoEnd);
+  }, []);
+
+  // テロップの画面表示連動処理
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -219,14 +164,14 @@ export default function App() {
     <div style={{ padding: '20px', maxWidth: '1000px', margin: '0 auto', fontFamily: 'system-ui, sans-serif', backgroundColor: '#f5f7fa', minHeight: '100vh' }}>
       <header style={{ marginBottom: '25px', backgroundColor: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '24px', margin: '0 0 5px 0', color: '#1d1d1f' }}>🎥 お子様動画専用・自動テロップ編集アプリ</h1>
-        <p style={{ color: '#86868b', fontSize: '14px', margin: 0 }}>確実に1秒のズレもなくテロップを作成・編集できます。</p>
+        <p style={{ color: '#86868b', fontSize: '14px', margin: 0 }}>動画を選ぶだけで、ズレのないテロップを完全自動で生成します。</p>
       </header>
       
       <div style={{ marginBottom: '25px', backgroundColor: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
         <input type="file" accept="video/*" onChange={handleVideoChange} style={{ fontSize: '15px' }} />
         {videoSrc && (
           <button 
-            onClick={startDirectTranscription} 
+            onClick={startAutoTranscription} 
             disabled={isProcessing}
             style={{
               marginLeft: '15px',
@@ -240,33 +185,12 @@ export default function App() {
               fontSize: '14px'
             }}
           >
-            {isProcessing ? `⏳ 解析中 (${progress}%)` : '✨ 超高精度テロップを自動生成'}
+            {isProcessing ? '⏳ 自動解析中...' : '✨ 超高精度テロップを自動生成'}
           </button>
         )}
 
-        {/* 📊 視覚的なプログレスバー表示エリア */}
-        {isProcessing && (
-          <div style={{ marginTop: '15px', backgroundColor: '#e5e5ea', borderRadius: '6px', height: '8px', width: '100%', overflow: 'hidden' }}>
-            <div style={{ 
-              backgroundColor: progressPhase === 'decode' ? '#ff9500' : '#0071e3', 
-              width: `${progress}%`, 
-              height: '100%', 
-              transition: 'width 0.4s ease' 
-            }} />
-          </div>
-        )}
-
         {statusMessage && (
-          <div style={{ 
-            marginTop: '15px', 
-            color: '#1d1d1f', 
-            fontSize: '14px', 
-            fontWeight: '500', 
-            backgroundColor: progressPhase === 'decode' ? '#fff9e6' : '#f2f2f7', 
-            padding: '12px 16px', 
-            borderRadius: '8px', 
-            borderLeft: `4px solid ${progressPhase === 'decode' ? '#ff9500' : '#0071e3'}` 
-          }}>
+          <div style={{ marginTop: '15px', color: '#1d1d1f', fontSize: '14px', fontWeight: '500', backgroundColor: '#f2f2f7', padding: '12px 16px', borderRadius: '8px', borderLeft: '4px solid #0071e3' }}>
             {statusMessage}
           </div>
         )}
@@ -284,7 +208,7 @@ export default function App() {
                 playsInline
                 style={{ width: '100%', display: 'block' }}
               />
-              {currentText && !currentText.includes('✏️') && !currentText.includes('（') && (
+              {currentText && (
                 <div style={{
                   position: 'absolute',
                   bottom: '65px',
@@ -311,11 +235,11 @@ export default function App() {
           </div>
 
           <div>
-            <h3 style={{ fontSize: '16px', marginBottom: '12px', color: '#1d1d1f' }}>📝 テロップタイムライン（自由に書き換えOK）</h3>
+            <h3 style={{ fontSize: '16px', marginBottom: '12px', color: '#1d1d1f' }}>📝 自動生成されたテロップタイムライン</h3>
             <div style={{ maxHeight: '500px', overflowY: 'auto', backgroundColor: '#fff', padding: '15px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)', border: '1px solid #e5e5ea' }}>
               {subtitles.length === 0 ? (
                 <div style={{ padding: '40px 20px', textAlign: 'center', color: '#86868b', fontSize: '14px' }}>
-                  上の「超高精度テロップを自動生成」ボタンを押してください。
+                  「✨ 超高精度テロップを自動生成」ボタンを押すと、動画内の声が自動でここにテキスト化されます。
                 </div>
               ) : (
                 subtitles.map((sub) => (
@@ -327,7 +251,6 @@ export default function App() {
                       type="text"
                       value={sub.text}
                       onChange={(e) => handleTextChange(sub.id, e.target.value)}
-                      onClick={(e) => { if((e.target as HTMLInputElement).value.includes('✏️') || (e.target as HTMLInputElement).value.includes('💡')) handleTextChange(sub.id, '') }}
                       style={{ 
                         width: '100%', 
                         padding: '10px', 
@@ -335,7 +258,7 @@ export default function App() {
                         borderRadius: '8px', 
                         border: '1px solid #d1d1d6', 
                         boxSizing: 'border-box',
-                        backgroundColor: sub.text.includes('✏️') ? '#fff9e6' : '#fff'
+                        backgroundColor: '#fff'
                       }}
                     />
                   </div>
