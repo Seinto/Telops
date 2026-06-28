@@ -25,46 +25,36 @@ export default function App() {
     }
   };
 
-  // 確実にステートが更新されるように処理を直列化しました
   const generateCaptions = () => {
     if (!videoSrc) return;
     setIsProcessing(true);
 
-    // テロップの元データを定義
     const dummySubtitles: Subtitle[] = [
       { id: 1, start: 1.0, end: 3.5, text: "こんにちは！プロトタイプへようこそ。" },
       { id: 2, start: 4.0, end: 7.0, text: "これはブラウザ上で動く自動テロップ生成のデモです。" },
       { id: 3, start: 8.0, end: 11.5, text: "動画の再生時間に合わせて文字が切り替わります。" },
     ];
 
-    // タイマー処理の確実性を上げるため、少しディレイを入れて確実に状態を変化させます
     setTimeout(() => {
       setSubtitles(dummySubtitles);
       setIsProcessing(false);
-      
-      // 生成されたら動画を最初に戻す（同期ズレを防ぐため）
       if (videoRef.current) {
         videoRef.current.currentTime = 0;
       }
-    }, 1000);
+    }, 500);
   };
 
-  // 再生時間の監視処理（大文字小文字の判定ミスを防ぐためシンプルに修正）
   const handleTimeUpdate = () => {
     if (!videoRef.current || subtitles.length === 0) return;
     
     const currentTime = videoRef.current.currentTime;
-    
-    // 現在の時間に合うテロップを探す
     const activeSubtitle = subtitles.find(
       (sub) => currentTime >= sub.start && currentTime <= sub.end
     );
     
-    if (activeSubtitle) {
-      setCurrentText(activeSubtitle.text);
-    } else {
-      setCurrentText('');
-    }
+    // 状態の更新をより確実にするため、変化があった時だけ反映
+    const nextText = activeSubtitle ? activeSubtitle.text : '';
+    setCurrentText(nextText);
   };
 
   const handleTextChange = (id: number, newText: string) => {
@@ -107,32 +97,35 @@ export default function App() {
           {/* 左側：プレビュー */}
           <div>
             <h3 style={{ fontSize: '16px', marginBottom: '10px' }}>プレビュー</h3>
-            <div style={{ position: 'relative', width: '100%', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden' }}>
+            {/* 全体を括るコンテナの z-index を強化 */}
+            <div style={{ position: 'relative', width: '100%', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden', zIndex: 1 }}>
               <video
                 ref={videoRef}
                 src={videoSrc}
                 controls
                 onTimeUpdate={handleTimeUpdate}
-                style={{ width: '100%', display: 'block' }}
+                playsInline /* 👈 iOSでのインライン再生を強制し、フルスクリーン化を防ぐ最重要プロパティ */
+                style={{ width: '100%', display: 'block', position: 'relative', zIndex: 2 }}
               />
-              {/* テロップオーバーレイの表示（最前面に来るよう z-index を追加） */}
+              {/* テロップを動画の前に完全に浮かせ、クリックも透過させる設定 */}
               {currentText && (
                 <div style={{
                   position: 'absolute',
-                  bottom: '50px',
+                  bottom: '60px',
                   left: '50%',
                   transform: 'translateX(-50%)',
-                  backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                  backgroundColor: 'rgba(0, 0, 0, 0.85)',
                   color: '#fff',
-                  padding: '8px 16px',
+                  padding: '10px 20px',
                   borderRadius: '6px',
-                  fontSize: '18px',
+                  fontSize: '20px',
+                  fontWeight: 'bold',
                   textAlign: 'center',
-                  pointerEvents: 'none',
                   maxWidth: '85%',
                   wordBreak: 'break-word',
-                  boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
-                  zIndex: 10
+                  boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
+                  zIndex: 9999, /* 👈 絶対に最前面に持ってくる */
+                  pointerEvents: 'none'
                 }}>
                   {currentText}
                 </div>
