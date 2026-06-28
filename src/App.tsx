@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 interface Subtitle {
   id: number;
@@ -44,18 +44,29 @@ export default function App() {
     }, 500);
   };
 
-  const handleTimeUpdate = () => {
-    if (!videoRef.current || subtitles.length === 0) return;
-    
-    const currentTime = videoRef.current.currentTime;
-    const activeSubtitle = subtitles.find(
-      (sub) => currentTime >= sub.start && currentTime <= sub.end
-    );
-    
-    // 状態の更新をより確実にするため、変化があった時だけ反映
-    const nextText = activeSubtitle ? activeSubtitle.text : '';
-    setCurrentText(nextText);
-  };
+  // 💡 【超重要】onTimeUpdateに頼らず、JavaScript側で100ミリ秒ごとに強制的に時間を監視する仕組みを追加しました
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const intervalCheck = () => {
+      if (subtitles.length === 0) return;
+      
+      const currentTime = video.currentTime;
+      const activeSubtitle = subtitles.find(
+        (sub) => currentTime >= sub.start && currentTime <= sub.end
+      );
+      
+      setCurrentText(activeSubtitle ? activeSubtitle.text : '');
+    };
+
+    // 100msごとに再生時間をチェックするタイマーを起動
+    const timerId = setInterval(intervalCheck, 100);
+
+    return () => {
+      clearInterval(timerId);
+    };
+  }, [subtitles]);
 
   const handleTextChange = (id: number, newText: string) => {
     setSubtitles((prev) =>
@@ -97,17 +108,15 @@ export default function App() {
           {/* 左側：プレビュー */}
           <div>
             <h3 style={{ fontSize: '16px', marginBottom: '10px' }}>プレビュー</h3>
-            {/* 全体を括るコンテナの z-index を強化 */}
             <div style={{ position: 'relative', width: '100%', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden', zIndex: 1 }}>
               <video
                 ref={videoRef}
                 src={videoSrc}
                 controls
-                onTimeUpdate={handleTimeUpdate}
-                playsInline /* 👈 iOSでのインライン再生を強制し、フルスクリーン化を防ぐ最重要プロパティ */
+                playsInline
                 style={{ width: '100%', display: 'block', position: 'relative', zIndex: 2 }}
               />
-              {/* テロップを動画の前に完全に浮かせ、クリックも透過させる設定 */}
+              {/* テロップを動画の前に完全に浮かせる設定 */}
               {currentText && (
                 <div style={{
                   position: 'absolute',
@@ -124,7 +133,7 @@ export default function App() {
                   maxWidth: '85%',
                   wordBreak: 'break-word',
                   boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
-                  zIndex: 9999, /* 👈 絶対に最前面に持ってくる */
+                  zIndex: 9999,
                   pointerEvents: 'none'
                 }}>
                   {currentText}
