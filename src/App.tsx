@@ -30,58 +30,80 @@ export default function App() {
     }
   };
 
-  // 💡 【修正の核心】MOV形式などの互換性エラーを回避し、安全に音声を波形(Float32Array)に変換する関数
-  const extractAudioData = async (file: File): Promise<Float32Array> => {
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-    const arrayBuffer = await file.arrayBuffer();
-    
-    let audioBuffer;
-    try {
-      // 通常のデコードを試みる
-      audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    } catch (decodeError) {
-      console.warn("標準デコーダーでの失敗のため、代替デコードを試みます:", decodeError);
-      
-      // 💡 代替策：標準デコードがMOV等の形式で拒否された場合、隠しaudio要素を使ってブラウザのネイティブ再生エンジン経由で音声を吸い出します
-      const blobUrl = URL.createObjectURL(file);
-      const audioEl = new Audio(blobUrl);
-      audioEl.muted = true;
-      audioEl.playsInline = true;
-      
-      return new Promise((resolve, reject) => {
-        audioEl.oncanplaythrough = async () => {
-          try {
-            // 端末依存のエラーを極力回避するため、一時的にMediaElementから波形をサンプリング
-            const streamDest = audioCtx.createMediaStreamDestination();
-            const source = audioCtx.createMediaElementSource(audioEl);
-            source.connect(streamDest);
-            
-            // 安全なバッファ確保が難しい環境向けに、まずは空の16kHzモノラル波形として10秒分(または一般的な動画サイズ)をダミー作成、
-            // もしくは元のコンテキストからチャンネルデータを安全に引き出します。
-            // ここでは最もエラーが起きにくい「ArrayBufferの再検証」とフォールバック処理を徹底します。
-            throw new Error("Browser Audio Node restriction");
-          } catch (e) {
-            // 最終フォールバック：データが読み込めない場合は、ファイルから直接ヘッダを無視して
-            // 簡易的にRAWバイナリをFloat32にマッピングするか、エラーを明示します
-            reject(new Error("お使いのブラウザはこの動画形式(.MOVなど)の音声抽出に対応していません。.mp4 形式でお試しいただくか、別のブラウザでお試しください。"));
+  // 🔥 【Safari対応の最終兵器】裏側で動画を高速再生して音声を録音・抽出する関数
+  const extractAudioForSafari = async (file: File): Promise<Float32Array> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        const blobUrl = URL.createObjectURL(file);
+        
+        // 音声抽出用の隠しオーディオ/ビデオ要素を作成
+        const audioEl = document.createElement('audio');
+        audioEl.src = blobUrl;
+        audioEl.muted = false; // 内部のStreamに流すため消音はオフ
+        audioEl.playsInline = true;
+
+        // 💡 16倍速で再生して抽出時間を圧倒的に短縮する
+        audioEl.playbackRate = 16.0;
+
+        const source = audioCtx.createMediaElementSource(audioEl);
+        
+        // 16kHzモノラルでキャプチャするためのバッファ(最長5分を想定)
+        const maxDuration = 300; 
+        const bufferSize = 16000 * maxDuration;
+        const internalBuffer = new Float32Array(bufferSize);
+        let writeIndex = 0;
+
+        // 音声をリアルタイムに監視して配列に詰め込むノード
+        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (e) => {
+          const inputData = e.inputBuffer.getChannelData(0);
+          if (writeIndex + inputData.length < internalBuffer.length) {
+            internalBuffer.set(inputData, writeIndex);
+            writeIndex += inputData.length;
           }
         };
-        audioEl.onerror = () => reject(new Error("動画ファイルの読み込みに失敗しました。"));
-      });
-    }
-    
-    return audioBuffer.getChannelData(0);
+
+        // 音声ラインを接続（スピーカーには流さず録音ノードにだけ流すので無音になります）
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
+
+        // 再生が終わったらデータを切り出して完了
+        audioEl.onended = () => {
+          audioCtx.close();
+          URL.revokeObjectURL(blobUrl);
+          // 実際に録音できた部分だけを綺麗に切り出す
+          const finalAudioData = internalBuffer.slice(0, writeIndex);
+          resolve(finalAudioData);
+        };
+
+        audioEl.onerror = () => {
+          reject(new Error("Safariでの動画読み込みに失敗しました。"));
+        };
+
+        // 録音開始
+        await audioEl.play();
+      } catch (err) {
+        reject(err);
+      }
+    });
   };
 
   // 🤖 AIによる音声認識処理
   const generateCaptions = async () => {
     if (!videoFile) return;
     setIsProcessing(true);
-    setStatusMessage('🤖 AIモデルを準備中... (初回のみダウンロードに30秒〜1分かかります)');
+    setStatusMessage('🤖 AIモデルを準備中... (初回のみ1分ほどかかります)');
 
     try {
-      setStatusMessage('🎵 動画から音声データを抽出しています...');
-      const audioData = await extractAudioData(videoFile);
+      setStatusMessage('🎵 [Safari対応モード] 動画の音声を高精度でデコード中...');
+      
+      // Safariのセキュリティブロックを回避する新方式を実行
+      const audioData = await extractAudioForSafari(videoFile);
+
+      if (!audioData || audioData.length === 0) {
+        throw new Error("音声波形データの抽出に失敗しました。動画に音が含まれているか確認してください。");
+      }
 
       setStatusMessage('🧠 AI(Whisper)をブラウザ内にロード中...');
       const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
@@ -113,12 +135,12 @@ export default function App() {
         setSubtitles([{ id: 1, start: 0.0, end: (videoRef.current?.duration || 10.0), text: (result as any).text.trim() }]);
         setStatusMessage('🎉 テロップを生成しました（単一ブロック）');
       } else {
-        throw new Error("解析結果が空でした。");
+        throw new Error("音声は認識されましたが、文字が検出されませんでした。");
       }
 
     } catch (error: any) {
       console.error(error);
-      setStatusMessage(`❌ エラー: ${error.message || '動画形式(特に.MOV)の音声デコードに失敗しました。.mp4形式に変換するか、別のブラウザを試してください。'}`);
+      setStatusMessage(`❌ エラー: ${error.message || '音声のデコードに失敗しました。'}`);
     } finally {
       setIsProcessing(false);
     }
